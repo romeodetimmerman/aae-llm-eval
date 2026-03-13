@@ -1,6 +1,6 @@
 """
 module to preprocesses the CORAAL data
-- we filter out para/non-linguistic utterances (e.g. laughter, coughing, etc.)
+- we filter out para/non-linguistic utterances (e.g. laughter, coughing, overlap, etc.)
 - we merge consecutive speaker utterances into a single turn
 - we only keep speaker labels and spoken turns
 
@@ -26,13 +26,15 @@ def preprocess_transcript(path):
         r"/inaudible/",
         r"/[?]*/",
         r"[\[\]/]",
+        '"'  # some transcripts have quotation marks
     ]
 
     # iterate over lines in the transcript file
     first = True
     current_speaker = None
     current_text = ""
-    turns: list[tuple[str, str]] = []
+    turns = []
+    speaker_map = {}
 
     with path.open(encoding="utf8", errors="ignore") as f:
         for line in f:
@@ -44,23 +46,29 @@ def preprocess_transcript(path):
             if len(parts) < 4:
                 continue
 
-            speaker = parts[1].strip()
-            sent = parts[3]
+            original_speaker = parts[1].strip()
+            utterance = parts[3]
+
+            # NB some interviews may have more than 2 speakers, though this is rare
+            if original_speaker not in speaker_map:
+                speaker_map[original_speaker] = f"Speaker {len(speaker_map) + 1}"
+
+            speaker = speaker_map[original_speaker]
 
             for pattern in to_remove:
-                sent = re.sub(pattern, "", sent)
+                utterance = re.sub(pattern, "", utterance)
 
-            sent = sent.strip()
-            if not sent:
+            utterance = utterance.strip()
+            if not utterance:
                 continue
 
             if speaker == current_speaker:
-                current_text += " " + sent
+                current_text += " " + utterance
             else:
                 if current_speaker is not None and current_text.strip():
                     turns.append((current_speaker, current_text.strip()))
                 current_speaker = speaker
-                current_text = sent
+                current_text = utterance
 
     if current_speaker is not None and current_text.strip():
         turns.append((current_speaker, current_text.strip()))

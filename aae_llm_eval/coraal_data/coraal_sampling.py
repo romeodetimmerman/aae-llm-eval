@@ -135,6 +135,112 @@ def sample_balanced(windows_with_aint, windows_without_aint, n_samples):
     return sampled_data
 
 
+def save_sampled_csvs(sampled_data, output_dir):
+    """
+    write three csv exports: metadata, rq1 (context + target), rq2 (contexts split by turn)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rq1_path = output_dir / "coraal_samples_RQ1.csv"
+    rq2_path = output_dir / "coraal_samples_RQ2.csv"
+    meta_path = output_dir / "coraal_samples_metadata.csv"
+
+    # RQ1: context split by turn, also include features to annotate
+    col_names_rq1 = [
+        "segment_id",
+        "turn_id",
+        "turn_index",
+        "context_turn",
+        "habitual_be",
+        "copula_deletion",
+        "third_person_s_deletion",
+        "possessive_s_deletion",
+        "multiple_negation",
+    ]
+
+    # RQ2: context + target
+    col_names_rq2 = [
+        "sample_id",
+        "context",
+        "target",
+    ]
+
+    # keep metadata separate
+    col_names_meta = [
+        "sample_id",
+        "source_file",
+        "start_line",
+        "context_word_count",
+        "target_word_count",
+        "contains_aint",
+    ]
+
+    with (
+        rq1_path.open("w", encoding="utf8", newline="") as f_rq1, 
+        rq2_path.open("w", encoding="utf8", newline="") as f_rq2,
+        meta_path.open("w", encoding="utf8", newline="") as f_meta
+    ):
+        writer_rq1 = csv.DictWriter(f_rq1, fieldnames=col_names_rq1)
+        writer_rq2 = csv.DictWriter(f_rq2, fieldnames=col_names_rq2)
+        writer_meta = csv.DictWriter(f_meta, fieldnames=col_names_meta)
+        writer_rq1.writeheader()
+        writer_rq2.writeheader()
+        writer_meta.writeheader()
+
+        feature_dict = {
+            "habitual_be": 0,
+            "copula_deletion": 0,
+            "third_person_s_deletion": 0,
+            "possessive_s_deletion": 0,
+            "multiple_negation": 0,
+        }
+
+        turn_id = 1
+        for segment_id, row in enumerate(sampled_data):
+            sample_id = segment_id + 1
+            context_turns = row["context_turns"]
+            target_turn = row["target_turn"]
+
+            context_str = "\n".join(
+                f"{speaker}\t{text}" for speaker, text in context_turns
+            )
+            target_str = f"{target_turn[0]}\t{target_turn[1]}"
+
+            full_window = context_turns + [target_turn]
+            contains_aint = window_contains_aint(full_window)
+
+            writer_meta.writerow(
+                {
+                    "sample_id": sample_id,
+                    "source_file": row["source_file"],
+                    "start_line": row["start_line"],
+                    "context_word_count": row["context_word_count"],
+                    "target_word_count": row["target_word_count"],
+                    "contains_aint": int(contains_aint),
+                }
+            )
+
+            for turn_index, (speaker, text) in enumerate(context_turns, start=1):
+                context_turn_line = f"{speaker}\t{text}"
+                writer_rq1.writerow(
+                    {
+                        "segment_id": sample_id,
+                        "turn_id": turn_id,
+                        "turn_index": turn_index,
+                        "context_turn": context_turn_line,
+                        **feature_dict,
+                    }
+                )
+                turn_id += 1
+            
+            writer_rq2.writerow(
+                {
+                    "sample_id": sample_id,
+                    "context": context_str,
+                    "target": target_str,
+                }
+            )
+
+
 def sample_coraal():
     """
     sample a subset of conversational segments from the CORAAL data
@@ -161,49 +267,11 @@ def sample_coraal():
         n_samples=N_SAMPLES,
     )
 
-    # save as a csv file
-    SAMPLED_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_file = SAMPLED_TRANSCRIPTS_DIR / "coraal_samples.csv"
-
-    # keep some metadata about the sampled segments
-    fieldnames = [
-        "source_file",
-        "start_line",
-        "context_word_count",
-        "target_word_count",
-        "context",
-        "target",
-    ]
-
-    # write the sampled data to a csv file
-    with output_file.open("w", encoding="utf8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-
-        for row in sampled_data:
-            context_turns = row["context_turns"]
-            target_turn = row["target_turn"]
-
-            context_str = "\n".join(
-                f"{speaker}\t{text}" for speaker, text in context_turns
-            )
-            target_str = f"{target_turn[0]}\t{target_turn[1]}"
-
-            writer.writerow(
-                {
-                    "source_file": row["source_file"],
-                    "start_line": row["start_line"],
-                    "context_word_count": row["context_word_count"],
-                    "target_word_count": row["target_word_count"],
-                    "context": context_str,
-                    "target": target_str,
-                }
-            )
-
-    print(f"successfully sampled {len(sampled_data)} segments to {output_file}")
+    # save sampled data to csv files
+    save_sampled_csvs(sampled_data, SAMPLED_TRANSCRIPTS_DIR)
+    print(f"successfully sampled {len(sampled_data)} segments and saved them to {SAMPLED_TRANSCRIPTS_DIR}")
 
 
 if __name__ == "__main__":
-    # setting seed for reproducibility of the 100 samples
     random.seed(SEED)
     sample_coraal()

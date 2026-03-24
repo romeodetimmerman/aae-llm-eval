@@ -1,11 +1,10 @@
 """
-module to randomly sample a subset of conversational 5-turn segments from the CORAAL data
-and keep a single following turn for each sampled segment for RQ2
+module to randomly sample a subset of conversational segments from the CORAAL data
+each sample includes 5 turns of context (RQ1) and 1 target turn (RQ2)
 """
 
 import csv
 import random
-import re
 from aae_llm_eval.paths import PREPROCESSED_TRANSCRIPTS_DIR, SAMPLED_TRANSCRIPTS_DIR
 
 SEED = 42
@@ -22,23 +21,21 @@ def window_is_valid(window):
     return min(window_turn_word_counts) >= MIN_TURN_WORD_COUNT
 
 
-def window_contains_aint(window):
+def target_not_in_context(context_turns, target_turn):
     """
-    check if lexical item "ain't" occurs in window
+    check if target text is absent from context turns
     """
-    for _, text in window:
-        if re.search(r"\bain't\b", text, flags=re.IGNORECASE):
-            return True
-    return False
+    context_texts = {text.strip().lower() for _, text in context_turns}
+    target_text = target_turn[1].strip().lower()
+    return target_text not in context_texts
 
 
 def collect_valid_windows(transcripts, n_context_turns):
     """
-    collect valid windows and split aint presence
+    collect valid windows (n_context_turns context + 1 target)
     """
-    windows_with_aint = []
-    windows_without_aint = []
-
+    # init windows
+    windows = []
     window_size = n_context_turns + 1
 
     # loop over all transcripts
@@ -69,6 +66,10 @@ def collect_valid_windows(transcripts, n_context_turns):
             context_turns = window[:n_context_turns]
             target_turn = window[n_context_turns]
 
+            # skip windows where target text repeats in context
+            if not target_not_in_context(context_turns, target_turn):
+                continue
+
             # get context and target text
             context_text = " ".join([turn[1] for turn in context_turns])
             target_text = target_turn[1]
@@ -86,53 +87,49 @@ def collect_valid_windows(transcripts, n_context_turns):
                 "target_turn": target_turn,
             }
 
-            # check if window contains aint
-            if window_contains_aint(window):
-                windows_with_aint.append(window_data)
-            else:
-                windows_without_aint.append(window_data)
+            # keep all valid windows
+            windows.append(window_data)
 
-    return windows_with_aint, windows_without_aint
+    return windows
 
 
-def sample_balanced(windows_with_aint, windows_without_aint, n_samples):
+def window_turn_ids(window, n_context_turns):
     """
-    sample half of segments from windows with and without "ain't"
+    return ids for all turns used by this window
     """
-    # even sample size for simplicity
-    assert n_samples % 2 == 0, "n_samples must be even"
+    base = window["start_line"]
+    src = window["source_file"]
+    window_size = n_context_turns + 1
+    return {(src, base + k) for k in range(window_size)}
 
-    total_valid_windows = len(windows_with_aint) + len(windows_without_aint)
 
-    # check if there are enough valid windows to sample from
-    if total_valid_windows <= n_samples:
-        return windows_with_aint + windows_without_aint
+def sample_random_non_overlapping_windows(
+    windows, n_samples, n_context_turns
+):
+    """
+    sample windows without reusing any turns
+    """
+    candidates = list(windows)
+    random.shuffle(candidates)
 
-    # sample half of segments from each group
-    half = n_samples // 2
-    target_with_aint = min(half, len(windows_with_aint))
-    target_without_aint = min(half, len(windows_without_aint))
+    used_turns = set()
+    selected = []
 
-    sampled_with_aint = random.sample(windows_with_aint, target_with_aint)
-    sampled_without_aint = random.sample(windows_without_aint, target_without_aint)
+    for window in candidates:
+        # make sure windows do not share any turns
+        turn_ids = window_turn_ids(window, n_context_turns)
+        if not used_turns.isdisjoint(turn_ids):
+            continue
 
-    sampled_data = sampled_with_aint + sampled_without_aint
+        # keep track of used turns
+        used_turns.update(turn_ids)
+        selected.append(window)
 
-    # check if we sampled enough segments
-    # if one of the two groups has less than half the samples, we need to sample from the remaining pool
-    if len(sampled_data) < n_samples:
-        remaining = n_samples - len(sampled_data)
-        remaining_pool = [
-            w
-            for w in windows_with_aint + windows_without_aint
-            if w not in sampled_data
-        ]
-        sampled_data.extend(random.sample(remaining_pool, remaining))
+        # stop as soon as we have enough samples
+        if len(selected) >= n_samples:
+            break
 
-    # shuffle the sampled data
-    random.shuffle(sampled_data)
-
-    return sampled_data
+    return selected
 
 
 def save_sampled_csvs(sampled_data, output_dir):
@@ -153,7 +150,7 @@ def save_sampled_csvs(sampled_data, output_dir):
         "habitual_be",
         "copula_deletion",
         "third_person_s_deletion",
-        "possessive_s_deletion",
+        "is_was_generalization",
         "multiple_negation",
     ]
 
@@ -171,7 +168,6 @@ def save_sampled_csvs(sampled_data, output_dir):
         "start_line",
         "context_word_count",
         "target_word_count",
-        "contains_aint",
     ]
 
     with (
@@ -190,7 +186,7 @@ def save_sampled_csvs(sampled_data, output_dir):
             "habitual_be": 0,
             "copula_deletion": 0,
             "third_person_s_deletion": 0,
-            "possessive_s_deletion": 0,
+            "is_was_generalization": 0,
             "multiple_negation": 0,
         }
 
@@ -205,9 +201,6 @@ def save_sampled_csvs(sampled_data, output_dir):
             )
             target_str = f"{target_turn[0]}\t{target_turn[1]}"
 
-            full_window = context_turns + [target_turn]
-            contains_aint = window_contains_aint(full_window)
-
             writer_meta.writerow(
                 {
                     "sample_id": sample_id,
@@ -215,7 +208,6 @@ def save_sampled_csvs(sampled_data, output_dir):
                     "start_line": row["start_line"],
                     "context_word_count": row["context_word_count"],
                     "target_word_count": row["target_word_count"],
-                    "contains_aint": int(contains_aint),
                 }
             )
 
@@ -249,22 +241,22 @@ def sample_coraal():
     transcripts = list(PREPROCESSED_TRANSCRIPTS_DIR.glob("*.txt"))
 
     print(f"searching for valid windows in {len(transcripts)} files")
-    windows_with_aint, windows_without_aint = collect_valid_windows(
+    windows = collect_valid_windows(
         transcripts=transcripts, n_context_turns=N_CONTEXT_TURNS
     )
 
-    total_valid_windows = len(windows_with_aint) + len(windows_without_aint)
-    print(f"found {len(windows_with_aint)} valid windows with \"ain't\" and {len(windows_without_aint)} without")
+    total_valid_windows = len(windows)
+    print(f"found {total_valid_windows} valid windows")
 
     # check if we have enough valid windows to sample from
     if total_valid_windows < N_SAMPLES:
         print(f"warning: only found {total_valid_windows} valid windows, sampling all")
 
-    # sample half of segments from each group
-    sampled_data = sample_balanced(
-        windows_with_aint=windows_with_aint,
-        windows_without_aint=windows_without_aint,
-        n_samples=N_SAMPLES,
+    n_to_sample = min(N_SAMPLES, total_valid_windows)
+    sampled_data = sample_random_non_overlapping_windows(
+        windows=windows,
+        n_samples=n_to_sample,
+        n_context_turns=N_CONTEXT_TURNS,
     )
 
     # save sampled data to csv files
